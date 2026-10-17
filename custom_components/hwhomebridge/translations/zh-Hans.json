@@ -29,6 +29,15 @@
         "data": {
           "devices": "已接入设备"
         }
+      },
+      "xiaoyi_control": {
+        "title": "小艺家庭控制",
+        "description": "启用后开放独立的私有控制接口，覆盖有区域的照明灯及指定仪表盘窗帘页面的设备。私有路径（不要公开）：{webhook_path}",
+        "data": {
+          "enabled": "启用小艺家庭控制",
+          "dashboard_file": "仪表盘 YAML 文件",
+          "cover_view": "窗帘页面路径"
+        }
       }
     },
     "progress": {

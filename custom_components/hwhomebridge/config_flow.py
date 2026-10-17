@@ -11,6 +11,7 @@
 
 import asyncio
 import logging
+import secrets
 import time
 import voluptuous as vol
 
@@ -92,6 +93,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_pin_binding()
             elif action == "device_management":
                 return await self.async_step_select_device()
+            elif action == "xiaoyi_control":
+                return await self.async_step_xiaoyi_control()
         
         # 显示选择菜单
         return self.async_show_form(
@@ -100,8 +103,33 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required("action", default="pin_binding"): vol.In({
                     "pin_binding": "PIN绑定",
                     "device_management": "设备管理",
+                    "xiaoyi_control": "小艺家庭控制",
                 }),
             }),
+        )
+
+    async def async_step_xiaoyi_control(self, user_input=None):
+        """Opt in to the independent, scoped Skill webhook."""
+        from .xiaoyi_api import CONFIG_KEY, DEFAULT_DASHBOARD
+
+        entry = self.config_entry
+        settings = entry.data.get(CONFIG_KEY, {})
+        if user_input is not None:
+            settings = {**settings, **user_input}
+            settings.setdefault("webhook_id", secrets.token_hex(32))
+            self.hass.config_entries.async_update_entry(
+                entry, data={**entry.data, CONFIG_KEY: settings})
+            self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+            return self.async_create_entry(title="", data=dict(entry.options))
+        return self.async_show_form(
+            step_id="xiaoyi_control",
+            data_schema=vol.Schema({
+                vol.Required("enabled", default=settings.get("enabled", False)): bool,
+                vol.Required("dashboard_file", default=settings.get("dashboard_file", DEFAULT_DASHBOARD)): str,
+                vol.Required("cover_view", default=settings.get("cover_view", "curtains")): str,
+            }),
+            description_placeholders={"webhook_path": "/api/webhook/" + settings["webhook_id"]
+                                      if settings.get("webhook_id") else "启用后重新打开此页面查看"},
         )
     
     async def async_step_pin_binding(self, user_input=None):

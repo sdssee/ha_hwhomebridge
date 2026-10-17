@@ -29,6 +29,15 @@
         "data": {
           "devices": "Bridged Devices"
         }
+      },
+      "xiaoyi_control": {
+        "title": "Xiaoyi home control",
+        "description": "Enable the private control API for area lights and the configured curtain dashboard view. Keep this path private: {webhook_path}",
+        "data": {
+          "enabled": "Enable Xiaoyi home control",
+          "dashboard_file": "Dashboard YAML file",
+          "cover_view": "Cover view path"
+        }
       }
     },
     "progress": {
