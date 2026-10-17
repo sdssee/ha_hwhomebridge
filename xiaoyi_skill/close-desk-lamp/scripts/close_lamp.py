@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import ssl
+import socket
 import sys
 from urllib.parse import urlsplit
 import uuid
@@ -40,10 +41,24 @@ def open_verified_connection(target, settings):
     context = ssl.create_default_context()
     if settings.get("tls12_compat", True):
         context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+    # TCP may succeed on one Cloudflare address while its TLS/HTTP path stalls.
+    # Rotate the DNS addresses for harmless preflights instead of retrying the
+    # same first address. Keep the original hostname for both SNI and Host.
+    addresses = socket.getaddrinfo(target.hostname, target.port or 443, type=socket.SOCK_STREAM)
+    ipv4 = [item for item in addresses if item[0] == socket.AF_INET]
+    addresses = list(dict.fromkeys(ipv4 or addresses))
+    if not addresses:
+        raise ConnectionError("No gateway address")
     # Only GETs may retry; catalog and control POSTs are each sent once.
-    for _ in range(3):
+    for attempt in range(3):
         connection = http.client.HTTPSConnection(target.hostname, target.port or 443, timeout=5, context=context)
+        raw_socket = None
         try:
+            family, socktype, proto, _, address = addresses[attempt % len(addresses)]
+            raw_socket = socket.socket(family, socktype, proto)
+            raw_socket.settimeout(5)
+            raw_socket.connect(address)
+            connection.sock = context.wrap_socket(raw_socket, server_hostname=target.hostname)
             connection.request("GET", target.path, headers=HEADERS)
             response = connection.getresponse()
             health = read_json(response)
@@ -54,6 +69,8 @@ def open_verified_connection(target, settings):
         except (OSError, ValueError, http.client.HTTPException):
             pass
         connection.close()
+        if raw_socket is not None:
+            raw_socket.close()
     raise ConnectionError("Gateway unavailable")
 
 

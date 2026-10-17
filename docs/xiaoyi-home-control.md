@@ -58,7 +58,7 @@ python3 scripts/close_lamp.py --command status --entity-id cover.example
 
 无参数仍对应关闭名为“台灯”的灯，多台同名时会拒绝并返回候选。
 
-当前跨网环境启用 TLS 1.2 兼容和持久连接；证书和主机名验证保持开启。最多重试3次无控制GET，仅在健康检查成功且连接可复用后，在同一连接发送一次POST。普通网络可在 settings 中设置 `tls12_compat=false` 使用系统默认TLS协商。
+当前跨网环境启用 TLS 1.2 兼容和持久连接；证书和主机名验证保持开启。最多重试3次无控制GET，轮换DNS返回的IPv4地址（无IPv4时尝试IPv6），原域名始终用于SNI、证书和Host验证，不固定公网IP。仅在健康检查成功且连接可复用后，在同一连接发送一次POST。普通网络可在 settings 中设置 `tls12_compat=false` 使用系统默认TLS协商。
 
 ## 验证与回滚
 

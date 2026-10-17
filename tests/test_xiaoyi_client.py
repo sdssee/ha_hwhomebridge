@@ -50,16 +50,32 @@ HEALTH = {"ok": True, "api_version": 1, "service": "hwhomebridge_home"}
 def settings(monkeypatch):
     monkeypatch.setattr(client, "load_settings", lambda: (
         SimpleNamespace(hostname="example.test", port=None, path="/private-control"), {}))
+    monkeypatch.setattr(client.socket, "getaddrinfo", lambda *a, **kw: [
+        (client.socket.AF_INET, client.socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
+        (client.socket.AF_INET, client.socket.SOCK_STREAM, 6, "", ("192.0.2.2", 443)),
+    ])
+    raw_sockets = []
+    def make_socket(*args):
+        sock = SimpleNamespace(settimeout=Mock(), connect=Mock(), close=Mock())
+        raw_sockets.append(sock)
+        return sock
+    monkeypatch.setattr(client.socket, "socket", make_socket)
+    context = SimpleNamespace(wrap_socket=Mock(side_effect=lambda sock, **kw: sock))
+    monkeypatch.setattr(client.ssl, "create_default_context", lambda: context)
+    return raw_sockets, context
 
 
 def test_only_get_preflight_retries_then_post_reuses_same_connection(monkeypatch):
-    settings(monkeypatch)
+    raw_sockets, context = settings(monkeypatch)
     connections = [Connection([TimeoutError()]), Connection([{"wrong": True}]), Connection([HEALTH, {"ok": True}])]
     factory = iter(connections)
     monkeypatch.setattr(client.http.client, "HTTPSConnection", lambda *a, **k: next(factory))
     assert client.request({"command": "catalog"})["ok"]
     assert [[r[0] for r in c.requests] for c in connections] == [["GET"], ["GET"], ["GET", "POST"]]
     assert all(c.closed for c in connections)
+    assert [s.connect.call_args.args[0] for s in raw_sockets] == [
+        ("192.0.2.1", 443), ("192.0.2.2", 443), ("192.0.2.1", 443)]
+    assert all(call.kwargs["server_hostname"] == "example.test" for call in context.wrap_socket.call_args_list)
 
 
 def test_post_timeout_is_never_retried(monkeypatch):
