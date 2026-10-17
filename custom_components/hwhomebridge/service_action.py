@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .product_registry import HAMapping, ServiceDef
+from .light_support import supports_light_action
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +60,13 @@ class ServiceActionDispatcher:
             return False
 
         action = mapping.action
+        if entity_id.startswith("light.") and self._hass:
+            state = self._hass.states.get(entity_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                return False
+            if not supports_light_action(state.attributes, action):
+                _LOGGER.debug("Unsupported light action %s for %s", action, entity_id)
+                return False
         
         # 应用值映射转换（如果定义）
         transformed_payload = self._apply_value_mapping(payload, mapping)
@@ -241,14 +249,14 @@ class ServiceActionDispatcher:
         if not self._hass:
             return False
 
-        br = payload.get("brightness", 0)
-        if br == 0:
+        br = payload.get("brightness")
+        if br is None:
             return False
 
         # 根据 brightness_range 做缩放
         brightness_range = mapping.brightness_range or 255
         br = int(br * 255 / brightness_range)
-        br = min(br, 255)
+        br = max(0, min(br, 255))
 
         self._call_service_async(
             domain="light",
@@ -282,6 +290,19 @@ class ServiceActionDispatcher:
             elif ct > ct_max:
                 _LOGGER.info(f"Color temp {ct} above max {ct_max}, clamped to {ct_max}")
                 ct = ct_max
+
+        state = self._hass.states.get(entity_id)
+        attrs = state.attributes if state else {}
+        ct_min = attrs.get("min_color_temp_kelvin")
+        ct_max = attrs.get("max_color_temp_kelvin")
+        if ct_min is None and attrs.get("max_mireds"):
+            ct_min = round(1000000 / attrs["max_mireds"])
+        if ct_max is None and attrs.get("min_mireds"):
+            ct_max = round(1000000 / attrs["min_mireds"])
+        if ct_min is not None:
+            ct = max(ct, ct_min)
+        if ct_max is not None:
+            ct = min(ct, ct_max)
 
         self._call_service_async(
             domain="light",

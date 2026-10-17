@@ -29,6 +29,8 @@
 
 ## 品类支持范围
 
+1.0.1 增加通用灯具发现与多灯路独立桥接，覆盖开关面板、晾衣机照明、模板灯和灯组。详见[灯具支持与升级说明](docs/light-support.md)。
+
 目前支持以下品类：
 
 1. 💡 床头灯(001) / 灯泡(002) / 小夜灯(003)
@@ -57,7 +59,7 @@
 1. 在 HACS 中添加自定义仓库：
 
 ```
-https://github.com/Wangxiaokang666-666/ha_hwhomebridge
+https://github.com/sdssee/ha_hwhomebridge
 ```
 
 2. 点击下载并安装

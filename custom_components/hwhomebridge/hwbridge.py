@@ -89,6 +89,8 @@ _excluded_device_sns = set()
 # 设备发现锁：防止 OnBridgeStatusCB 多次触发并发发现
 _discovery_lock = threading.Lock()
 _discovery_in_progress = False
+_light_discovery_timer = None
+_saved_device_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +221,7 @@ async def handle_started_event(event):
 
     # 监听设备删除事件
     ghass.bus.async_listen(EVENT_DEVICE_REGISTRY_UPDATED, handle_device_registry_updated)
+    ghass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, handle_entity_registry_updated)
 
     start_work = True
     
@@ -309,10 +312,13 @@ def stop_hw_hilink_bridge(hass: HomeAssistant):
     1. 遍历所有已注册子设备，逐个调用 status=2 删除云端信息
     2. 调用 C 侧 exit_brg() 重置网关并退出 SDK 后台线程
     """
-    global bridge_work, start_work
+    global bridge_work, start_work, _light_discovery_timer
 
     bridge_work = False
     start_work = False
+    if _light_discovery_timer is not None:
+        _light_discovery_timer.cancel()
+        _light_discovery_timer = None
 
     # 1. 逐个删除子设备云端信息（C 侧 exit_brg 不会级联删除子设备）
     if service_router is not None:
@@ -479,7 +485,7 @@ def _delayed_resync_all_devices():
         return
     _LOGGER.info("Starting delayed state re-sync for all devices")
     for vd in service_router.sn_manager.get_all_devices():
-        if _is_device_disabled(vd.sn):
+        if _is_device_disabled(vd.sn) or vd.sn in _excluded_device_sns or not vd.online:
             _LOGGER.debug(f"Skipping disabled device during resync: sn={vd.sn}")
             continue
         service_router.sync_device_state(vd)
@@ -720,10 +726,13 @@ def OnGetRoomInfoCB(sn_ptr, roomName_ptr, devName_ptr):
                     if bridge_entry and bridge_entry.name_by_user:
                         dev_name = bridge_entry.name_by_user
 
+                if not dev_name:
+                    dev_name = vd.display_name
+
                 # 其次：原始 HA 设备的 name_by_user 或 name
                 orig_entry = None
                 if not dev_name:
-                    orig_entry = dev_reg.devices.get(vd.ha_device_id)
+                    orig_entry = dev_reg.devices.get(vd.source_device_id)
                     if orig_entry:
                         dev_name = orig_entry.name_by_user or orig_entry.name or ""
 
@@ -732,7 +741,7 @@ def OnGetRoomInfoCB(sn_ptr, roomName_ptr, devName_ptr):
                 if bridge_entry and bridge_entry.area_id:
                     area_id = bridge_entry.area_id
                 elif orig_entry is None:
-                    orig_entry = dev_reg.devices.get(vd.ha_device_id)
+                    orig_entry = dev_reg.devices.get(vd.source_device_id)
                 if not area_id and orig_entry and orig_entry.area_id:
                     area_id = orig_entry.area_id
 
@@ -838,18 +847,153 @@ def _discover_and_register_devices(hass: HomeAssistant):
     skipped_count = 0
     
     # 对每个 device，调用 _register_single_device
-    for device_id in all_devices.keys():
+    for device_id in list(all_devices):
         result = _register_single_device(device_id)
         if result:
             registered_count += 1
         else:
             skipped_count += 1
+
+    # Template/group lights may have no device registry entry, or even no
+    # entity registry entry when configured without a unique_id.
+    for state in hass.states.async_all("light"):
+        entry = entity_reg.async_get(state.entity_id)
+        if entry is not None and entry.device_id:
+            continue
+        if entry is not None and (
+            entry.disabled_by is not None or entry.platform in SKIP_PLATFORMS
+        ):
+            continue
+        entity = _entity_info(state.entity_id, entry)
+        identity = "light:" + (entry.id if entry else state.entity_id)
+        _register_candidate(identity, state.name, [entity], source_device_id=None)
+
+    light_states = hass.states.async_all("light")
+    missing = [state.entity_id for state in light_states
+               if service_router.sn_manager.get_virtual_device_by_entity(state.entity_id) is None]
+    _LOGGER.info("Light discovery: %s entities, %s mapped, unmapped=%s",
+                 len(light_states), len(light_states) - len(missing), missing)
     
     _LOGGER.info(f"Device discovery complete: {registered_count} registered, "
                  f"{skipped_count} skipped")
 
 
+def _entity_info(entity_id, entry=None):
+    state = ghass.states.get(entity_id)
+    attrs = dict(state.attributes) if state else {}
+    return {
+        "entity_id": entity_id,
+        "registry_id": entry.id if entry else entity_id,
+        "domain": entity_id.split(".", 1)[0],
+        "device_class": (getattr(entry, "device_class", None)
+                         or attrs.get("device_class")),
+        "name": state.name if state else (getattr(entry, "name", None) or entity_id),
+        "attributes": attrs,
+    }
+
+
 def _register_single_device(device_id: str, reuse_sn: str = None, is_update: bool = False) -> bool:
+    """Preserve the existing device SN and expose every remaining light channel."""
+    if ghass is None or service_router is None:
+        return False
+    device = dr.async_get(ghass).async_get(device_id)
+    if device is None or device.disabled_by is not None:
+        return False
+    entries = er.async_entries_for_device(er.async_get(ghass), device_id)
+    entities = [_entity_info(entry.entity_id, entry) for entry in entries
+                if entry.disabled_by is None and entry.platform not in SKIP_PLATFORMS]
+    if not entities:
+        return False
+    lights = [entity for entity in entities if entity["domain"] == "light"]
+    name = device.name_by_user or device.name or ""
+    primary = None
+    if lights:
+        # Persist the primary channel so adding/reordering/renaming entities
+        # cannot move an existing Huawei SN to another lamp after a restart.
+        config_entries = ghass.config_entries.async_entries(DOMAIN)
+        config_entry = config_entries[0] if config_entries else None
+        primary_ids = dict(config_entry.data.get("primary_lights", {})) if config_entry else {}
+        primary_id = primary_ids.get(device_id)
+        if primary_id is None:
+            existing = service_router.sn_manager.get_by_device_id(device_id)
+            old_entity = existing.get_entity_for_service("switch") if existing else None
+            primary = next((entity for entity in lights if entity["entity_id"] == old_entity), lights[0])
+            primary_id = primary["registry_id"]
+            if config_entry:
+                primary_ids[device_id] = primary_id
+                ghass.config_entries.async_update_entry(
+                    config_entry, data={**config_entry.data, "primary_lights": primary_ids}
+                )
+        primary = next((entity for entity in lights if entity["registry_id"] == primary_id), None)
+    base_entities = [entity for entity in entities if entity["domain"] != "light" or entity is primary]
+    result = False
+    if base_entities:
+        result = _register_candidate(
+            device_id, name, base_entities, device.model or "", device.manufacturer or "",
+            reuse_sn, is_update, device_id,
+            display_name=primary["name"] if primary else name
+        )
+    for entity in lights:
+        owner = service_router.sn_manager.get_virtual_device_by_entity(entity["entity_id"])
+        if owner is not None and owner.ha_device_id == device_id:
+            continue
+        identity = "light:" + entity["registry_id"]
+        result = _register_candidate(
+            identity, entity["name"], [entity], source_device_id=device_id
+        ) or result
+    return result
+
+
+def handle_entity_registry_updated(event):
+    """Reconcile late entities, channel changes, renames and entity disabling."""
+    entity_id = event.data.get("entity_id", "")
+    if entity_id.startswith("light."):
+        _schedule_light_discovery()
+
+
+def _schedule_light_discovery():
+    global _light_discovery_timer
+    if ghass is None or not start_work or service_router is None:
+        return
+    if _light_discovery_timer is not None:
+        _light_discovery_timer.cancel()
+    _light_discovery_timer = ghass.loop.call_later(2, _refresh_lights)
+
+
+def _refresh_lights():
+    global _light_discovery_timer
+    _light_discovery_timer = None
+    registry = er.async_get(ghass)
+    registry_by_id = {entry.id: entry for entry in registry.entities.values()}
+    device_registry = dr.async_get(ghass)
+    for vd in list(service_router.sn_manager.get_all_devices()):
+        light_ids = [entity_id for entity_id in vd.get_all_entity_ids()
+                     if entity_id.startswith("light.")]
+        if not light_ids:
+            continue
+        eligible = False
+        for entity_id in light_ids:
+            entry = registry.async_get(entity_id)
+            registry_id = getattr(vd, "light_registry_ids", {}).get(entity_id)
+            if entry is None and registry_id is not None:
+                entry = registry_by_id.get(registry_id)
+            source = device_registry.devices.get(entry.device_id) if entry and entry.device_id else None
+            if entry:
+                eligible |= (entry.disabled_by is None and entry.platform not in SKIP_PLATFORMS
+                             and (source is None or source.disabled_by is None))
+            else:
+                eligible |= ghass.states.get(entity_id) is not None
+        if not eligible:
+            service_router.unregister_device(vd.ha_device_id)
+            registered_device_ids.discard(vd.ha_device_id)
+            _forget_device_id(vd.ha_device_id)
+            _remove_bridge_device_entry(vd.sn)
+    _discover_and_register_devices(ghass)
+    ghass.loop.call_later(30, _delayed_resync_all_devices)
+
+
+def _register_candidate(device_id, name, entity_list, model="", manufacturer="",
+                        reuse_sn=None, is_update=False, source_device_id=None, display_name=None):
     """注册单个设备到 HiLink
     
     从 HA 的 device_registry 和 entity_registry 收集设备信息，
@@ -871,63 +1015,24 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
         return False
     
     # 防重复注册：如果设备已注册且不是更新场景，跳过
-    if not is_update and device_id in registered_device_ids:
-        _LOGGER.debug(f"Device {device_id} already registered, skip")
-        return False
+    signature = (name, display_name, model, manufacturer, tuple(
+        (entity["entity_id"], entity.get("name"), entity.get("device_class"),
+         tuple(sorted(entity.get("attributes", {}).get("supported_color_modes") or [])),
+         entity.get("attributes", {}).get("supported_features", 0))
+        for entity in entity_list
+    ))
+    existing = service_router.sn_manager.get_by_device_id(device_id)
+    if existing and getattr(existing, "discovery_signature", None) == signature:
+        return True
+    if existing:
+        reuse_sn = existing.sn
+        is_update = True
 
     # 预生成 SN 用于排除检查（排除列表存储的是 SN，不是 device_id）
     expected_sn = SNManager.generate_sn(device_id) if not reuse_sn else reuse_sn
-    is_excluded = not is_update and expected_sn in _excluded_device_sns
+    is_excluded = expected_sn in _excluded_device_sns
     if is_excluded:
         _LOGGER.info(f"Device {device_id} (sn={expected_sn}) is excluded, will register to SNManager only")
-    device_reg = dr.async_get(ghass)
-    entity_reg = er.async_get(ghass)
-    
-    device_entry = device_reg.async_get(device_id)
-    if not device_entry:
-        _LOGGER.debug(f"Device {device_id} not found in registry")
-        return False
-    
-    # 收集该 device 下的所有 entity
-    device_entities = er.async_entries_for_device(entity_reg, device_id)
-    
-    # 跳过没有实体的设备
-    if not device_entities:
-        _LOGGER.debug(f"Device {device_id} has no entities, skipping")
-        return False
-    
-    entity_list = []
-    for entry in device_entities:
-        # 跳过来自反向桥接集成（如 huawei_smarthome）的实体，避免循环接入
-        if getattr(entry, "platform", None) in SKIP_PLATFORMS:
-            _LOGGER.debug(f"Skipping entity {entry.entity_id} from platform '{entry.platform}' to avoid bridge loop")
-            continue
-
-        state = ghass.states.get(entry.entity_id)
-        entity_name = state.name if state and hasattr(state, 'name') else ""
-        
-        # device_class 从两个来源获取：1) RegistryEntry 2) State.attributes
-        device_class = entry.device_class
-        if not device_class and state:
-            device_class = state.attributes.get('device_class')
-        
-        entity_list.append({
-            "entity_id": entry.entity_id,
-            "domain": entry.domain,
-            "device_class": device_class,
-            "name": entity_name,
-        })
-
-    # 过滤后若无可用实体，跳过该设备
-    if not entity_list:
-        _LOGGER.debug(f"Device {device_id} has no eligible entities after platform filter, skipping")
-        return False
-
-    # 构建设备信息
-    model = device_entry.model or ""
-    name = device_entry.name_by_user or device_entry.name or ""
-    manufacturer = device_entry.manufacturer or ""
-
     _LOGGER.debug(f"Registering device: id={device_id}, name={name}, model={model}, "
                   f"manufacturer={manufacturer}, entities={len(entity_list)}, "
                   f"reuse_sn={reuse_sn}, is_update={is_update}")
@@ -944,6 +1049,11 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
     )
 
     if vd is not None:
+        vd.source_device_id = source_device_id
+        vd.display_name = display_name or name
+        vd.discovery_signature = signature
+        vd.light_registry_ids = {entity["entity_id"]: entity["registry_id"]
+                                 for entity in entity_list if entity["domain"] == "light"}
         if is_excluded:
             vd.online = False
             _LOGGER.info(f"Device registered to SNManager only (excluded): sn={vd.sn}, device_id={device_id}")
@@ -964,14 +1074,20 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
 
         registered_device_ids.add(device_id)
 
-        if _is_device_disabled(vd.sn):
+        power_entity = vd.get_entity_for_service("switch")
+        power_state = ghass.states.get(power_entity) if power_entity else None
+        light_unavailable = bool(power_entity and power_entity.startswith("light.") and (
+            power_state is None or power_state.state in ("unavailable", "unknown")
+        ))
+        if _is_device_disabled(vd.sn) or light_unavailable:
             vd.online = False
             service_router.register_device_to_hilink(vd.sn, 0)
             _LOGGER.info(f"Device {device_id} (sn={vd.sn}) is disabled, reported offline")
         else:
             vd.online = True
 
-        _create_bridge_device_entry(vd, name, model, manufacturer)
+        _create_bridge_device_entry(vd, vd.display_name, model, manufacturer)
+        ghass.loop.call_later(30, _sync_registered_device, vd.sn)
 
         _LOGGER.info(f"Device registered, state sync deferred: sn={vd.sn}, device_id={device_id}, "
                      f"name={name}, model={model}")
@@ -980,6 +1096,14 @@ def _register_single_device(device_id: str, reuse_sn: str = None, is_update: boo
         # 匹配失败，静默跳过
         _LOGGER.debug(f"Device {device_id} ({name}, model={model}) did not match any product, skipping")
         return False
+
+
+def _sync_registered_device(sn):
+    if service_router is None:
+        return
+    vd = service_router.sn_manager.get_by_sn(sn)
+    if vd and vd.online and not _is_device_disabled(sn) and sn not in _excluded_device_sns:
+        service_router.sync_device_state(vd)
 
 
 # ---------------------------------------------------------------------------
@@ -1002,17 +1126,24 @@ def handle_state_event(event):
 
     vd = service_router.sn_manager.get_virtual_device_by_entity(entity_id)
     if vd is None:
+        if entity_id.startswith("light.") and event.data.get("new_state") is not None:
+            _schedule_light_discovery()
         return
 
     # 禁用设备不转发状态变化
-    if _is_device_disabled(vd.sn):
+    if _is_device_disabled(vd.sn) or vd.sn in _excluded_device_sns:
         return
 
     old_state = event.data['old_state']
     new_state = event.data['new_state']
+    if entity_id.startswith("light.") and (
+        new_state is None or old_state is None or
+        old_state.attributes.get("supported_color_modes") != new_state.attributes.get("supported_color_modes")
+    ):
+        _schedule_light_discovery()
 
     # 处理设备离线状态
-    if new_state and new_state.state == 'unavailable':
+    if new_state is None or new_state.state in ('unavailable', 'unknown'):
         if vd.online:
             vd.online = False
             service_router.register_device_to_hilink(vd.sn, 0)
@@ -1020,7 +1151,7 @@ def handle_state_event(event):
         return
 
     # 处理设备恢复在线
-    if old_state and old_state.state == 'unavailable':
+    if old_state is None or old_state.state in ('unavailable', 'unknown'):
         if not vd.online:
             vd.online = True
             service_router.register_device_to_hilink(vd.sn, 1)
@@ -1114,6 +1245,8 @@ def _handle_device_update_event(device_id: str, event):
     设备更新时，检查关键字段是否变化，决定是否重新注册。
     关键字段：model, manufacturer, name_by_user, name
     """
+    if 'disabled_by' in event.data.get('changes', {}):
+        _schedule_light_discovery()
     if device_id not in registered_device_ids:
         # 未注册的设备更新，按新设备处理
         _LOGGER.debug(f"Device {device_id} updated but not registered, treating as new device")
@@ -1147,13 +1280,12 @@ def _handle_device_remove_event(device_id: str):
     """处理设备删除事件"""
     _LOGGER.info(f"Device removed in HA: device_id={device_id}, reporting offline to HiLink")
     
-    vd = service_router.unregister_device(device_id)
-    if vd is not None:
-        registered_device_ids.discard(device_id)
-        _remove_bridge_device_entry(vd.sn)
-        _LOGGER.info(f"Device {device_id} (sn={vd.sn}) reported offline and cleaned up")
-    else:
-        _LOGGER.debug(f"Device {device_id} was not registered in HiLink, skip offline report")
+    for vd in list(service_router.sn_manager.get_all_devices()):
+        if vd.ha_device_id == device_id or vd.source_device_id == device_id:
+            service_router.unregister_device(vd.ha_device_id)
+            registered_device_ids.discard(vd.ha_device_id)
+            _forget_device_id(vd.ha_device_id)
+            _remove_bridge_device_entry(vd.sn)
 
 
 # ---------------------------------------------------------------------------
@@ -1450,10 +1582,19 @@ def _write_device_id_to_file(device_id: str):
         if not saved_device_file:
             _LOGGER.warning("saved_device_file is not set, cannot persist device_id")
             return
-        with open(saved_device_file, "a") as f:
-            f.write(device_id + '\n')
+        with _saved_device_lock:
+            # Write the current set even for queued older saves, so deletion
+            # followed by re-adding an entity uses a fresh HiLink bind (status=3).
+            with open(saved_device_file, "w") as f:
+                f.write("".join(identity + '\n' for identity in sorted(saved_device_ids)))
     except Exception as e:
         _LOGGER.error(f"Failed to save device_id {device_id}: {e}")
+
+
+def _forget_device_id(device_id):
+    saved_device_ids.discard(device_id)
+    if saved_device_file and ghass is not None:
+        ghass.loop.run_in_executor(None, _write_device_id_to_file, device_id)
 
 
 def _add_excluded_device(sn: str):

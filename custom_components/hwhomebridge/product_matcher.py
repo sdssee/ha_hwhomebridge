@@ -233,8 +233,10 @@ class ProductMatcher:
                 continue
 
             # 检查 name_keywords（可选）
+            # A light entity is authoritative. Its parent can be a wall panel,
+            # clothes dryer or router whose name has no lighting keyword.
             name_keywords = auto_match.get('name_keywords')
-            if name_keywords:
+            if name_keywords and required != {"light"}:
                 matched = False
                 for kw in name_keywords:
                     if kw.lower() in name_lower:

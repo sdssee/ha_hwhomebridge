@@ -183,7 +183,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         
         for vd in all_vds:
             name = vd.product.name or vd.product.pid
-            orig_device = dev_reg.devices.get(vd.ha_device_id)
+            orig_device = dev_reg.devices.get(vd.source_device_id)
             if orig_device:
                 name = orig_device.name_by_user or orig_device.name or name
             
@@ -196,6 +196,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             if not name and bridge_dev and bridge_dev.name:
                 name = bridge_dev.name
             
+            name = vd.display_name or name
             label = f"{name} ({vd.product.pid})"
             options_dict[vd.sn] = label
             
@@ -214,7 +215,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             )
 
             for vd in all_vds:
-                orig_device = dev_reg.devices.get(vd.ha_device_id)
+                orig_device = dev_reg.devices.get(vd.source_device_id)
                 name = vd.product.name or vd.product.pid
                 model = ""
                 manufacturer = ""
@@ -223,6 +224,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     model = orig_device.model or ""
                     manufacturer = orig_device.manufacturer or ""
 
+                name = vd.display_name or name
                 if vd.sn not in selected_sns:
                     service_router.register_device_to_hilink(vd.sn, 2)
                     vd.online = False

@@ -18,6 +18,7 @@ from .product_matcher import ProductMatcher, DeviceInfo
 from .virtual_device import VirtualDevice, ServiceEntry, SNManager
 from .service_action import ServiceActionDispatcher
 from .native_async import submit_native
+from .light_support import supports_light_action, color_temperature_kelvin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -116,8 +117,7 @@ class ServiceRouter:
         # 3. 创建 VirtualDevice
         if reuse_sn:
             # 更新场景：复用原 SN
-            # 先注销旧的 VirtualDevice（如果存在）
-            self.sn_manager.unregister(reuse_sn)
+            # 新映射验证成功后才替换旧的 VirtualDevice。
             sn = reuse_sn
         else:
             # 新设备：生成新 SN
@@ -134,6 +134,8 @@ class ServiceRouter:
             return None
 
         # 5. 注册到 SNManager
+        if reuse_sn:
+            self.sn_manager.unregister(reuse_sn)
         result = self.sn_manager.register(vd)
         if not result:
             _LOGGER.error(f"Device {device_id}: SNManager registration failed (SN conflict?)")
@@ -203,6 +205,10 @@ class ServiceRouter:
         for entity in entity_list:
             entity_domain = entity.get("domain", "")
             if entity_domain == mapping.domain:
+                if entity_domain == "light" and not supports_light_action(
+                    entity.get("attributes", {}), mapping.action
+                ):
+                    continue
                 candidates.append(entity)
 
         if not candidates:
@@ -507,7 +513,7 @@ class ServiceRouter:
             True 表示上报成功
         """
         vd = self.sn_manager.get_by_sn(sn)
-        if vd is None:
+        if vd is None or entity_state is None or entity_state.state in ("unknown", "unavailable"):
             return False
 
         # 找到该 entity 对应的所有 services（支持一个 entity 映射到多个服务）
@@ -558,8 +564,9 @@ class ServiceRouter:
             is_on = entity_state.state == "on"
             self._update_hw_bridge_status(sn, c_svc_id, {char_name: 1 if is_on else 0})
 
-            # light/fan 类型需要额外上报属性
-            if entity_state.state == "on" and domain in ("light", "fan"):
+            # Lights report each mapped service separately below; avoid duplicate
+            # reports and hard-coded 0-100 scaling from the switch mapping.
+            if entity_state.state == "on" and domain == "fan":
                 self._report_additional_attributes(sn, entity_state, mapping)
 
         elif value_attr == "state" and domain in ("sensor", "binary_sensor"):
@@ -694,8 +701,8 @@ class ServiceRouter:
         elif service_id == "cct" or (value_attr == "" and domain == "light" and service_id == "cct"):
             # cct 色温服务
             attrs = entity_state.attributes or {}
-            if "color_temp_kelvin" in attrs and attrs["color_temp_kelvin"] is not None:
-                color_temp = attrs["color_temp_kelvin"]
+            color_temp = color_temperature_kelvin(attrs)
+            if color_temp is not None:
                 self._update_hw_bridge_status(sn, c_svc_id, {char_name: color_temp})
 
         else:
@@ -920,7 +927,7 @@ class ServiceRouter:
             if svc_id == "brightness":
                 if state_value == "on":
                     brightness = entity_state.attributes.get('brightness', 0)
-                    brightness_huawei = int(brightness * 100 / 255) if brightness else 0
+                    brightness_huawei = int(brightness * (mapping.brightness_range or 100) / 255) if brightness else 0
                     return json.dumps({char_name: brightness_huawei})
                 else:
                     return json.dumps({char_name: 0})
@@ -928,7 +935,7 @@ class ServiceRouter:
             # --- cct: 色温，返回 color_temp_kelvin ---
             if svc_id == "cct":
                 attrs = entity_state.attributes or {}
-                color_temp = attrs.get("color_temp_kelvin") or 0
+                color_temp = color_temperature_kelvin(attrs) or 0
                 return json.dumps({char_name: color_temp})
 
             # --- sensor / binary_sensor: 状态类，返回枚举值或原始数值 ---
@@ -1089,12 +1096,12 @@ class ServiceRouter:
             True 表示同步成功
         """
         # 上报每个 service 的状态
-        for service_id, entry in vd.service_entries.items():
+        for entity_id in vd.get_all_entity_ids():
             # 获取 entity 的当前状态
             if self._hass:
-                state = self._hass.states.get(entry.entity_id)
+                state = self._hass.states.get(entity_id)
                 if state:
-                    self.report_state(vd.sn, entry.entity_id, state)
+                    self.report_state(vd.sn, entity_id, state)
         return True
 
     def _report_delay_state(self, sn: str, c_svc_id: str, state: str, mapping: HAMapping):

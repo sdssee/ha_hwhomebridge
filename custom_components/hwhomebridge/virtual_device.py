@@ -41,6 +41,9 @@ class VirtualDevice:
         self.sn: str = sn
         self.product: ProductDef = product
         self.ha_device_id: str = ha_device_id
+        # Bridge identity may represent one channel of a physical HA device.
+        self.source_device_id: Optional[str] = ha_device_id
+        self.display_name: str = ""
         self.service_entries: dict[str, ServiceEntry] = {}  # service_id -> ServiceEntry
         self.online: bool = False
         self.switch_state: int = 0  # 缓存 switch 状态（用于 button 映射场景）
@@ -103,7 +106,7 @@ class VirtualDevice:
 
     def get_all_entity_ids(self) -> list:
         """获取此虚拟设备关联的所有 entity_id"""
-        return [entry.entity_id for entry in self.service_entries.values()]
+        return list(dict.fromkeys(entry.entity_id for entry in self.service_entries.values()))
 
     def is_available(self) -> bool:
         """检查虚拟设备是否可用（至少有一个可用的 entity）"""

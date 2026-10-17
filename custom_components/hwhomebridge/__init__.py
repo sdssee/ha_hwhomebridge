@@ -42,7 +42,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # 为在 async_setup_entry 之前已注册的设备补建 HA 设备注册表条目
     if service_router is not None:
         for vd in service_router.sn_manager.get_all_devices():
-            device_entry = dev_reg.devices.get(vd.ha_device_id)
+            device_entry = dev_reg.devices.get(vd.source_device_id)
             name = ""
             model = ""
             manufacturer = ""
@@ -50,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 name = device_entry.name_by_user or device_entry.name or ""
                 model = device_entry.model or ""
                 manufacturer = device_entry.manufacturer or ""
-            _create_bridge_device_entry_async(vd, name, model, manufacturer)
+            _create_bridge_device_entry_async(vd, vd.display_name or name, model, manufacturer)
 
     _LOGGER.info("hwhomebridge config entry setup complete")
     return True
