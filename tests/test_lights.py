@@ -253,3 +253,12 @@ def test_failed_rematch_retains_old_mapping(env):
     assert env.router.register_device("device", "Unknown", [{"entity_id": "sensor.only",
         "domain": "sensor"}], reuse_sn=vd.sn) is None
     assert env.router.sn_manager.get_by_sn(vd.sn) is vd
+
+
+def test_ha_2026_device_collection_yields_entries(env, monkeypatch):
+    env.add("light.test", "device")
+    env.devices["device"].id = "device"
+    registry = NS(devices=list(env.devices.values()), async_get=env.devices.get)
+    monkeypatch.setattr(bridge.dr, "async_get", lambda hass: registry)
+    bridge._discover_and_register_devices(env.hass)
+    assert env.router.sn_manager.get_device_count() == 1

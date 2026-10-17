@@ -732,7 +732,7 @@ def OnGetRoomInfoCB(sn_ptr, roomName_ptr, devName_ptr):
                 # 其次：原始 HA 设备的 name_by_user 或 name
                 orig_entry = None
                 if not dev_name:
-                    orig_entry = dev_reg.devices.get(vd.source_device_id)
+                    orig_entry = dev_reg.async_get(vd.source_device_id)
                     if orig_entry:
                         dev_name = orig_entry.name_by_user or orig_entry.name or ""
 
@@ -741,7 +741,7 @@ def OnGetRoomInfoCB(sn_ptr, roomName_ptr, devName_ptr):
                 if bridge_entry and bridge_entry.area_id:
                     area_id = bridge_entry.area_id
                 elif orig_entry is None:
-                    orig_entry = dev_reg.devices.get(vd.source_device_id)
+                    orig_entry = dev_reg.async_get(vd.source_device_id)
                 if not area_id and orig_entry and orig_entry.area_id:
                     area_id = orig_entry.area_id
 
@@ -847,7 +847,8 @@ def _discover_and_register_devices(hass: HomeAssistant):
     skipped_count = 0
     
     # 对每个 device，调用 _register_single_device
-    for device_id in list(all_devices):
+    for device in list(all_devices):
+        device_id = device if isinstance(device, str) else device.id
         result = _register_single_device(device_id)
         if result:
             registered_count += 1
@@ -977,7 +978,7 @@ def _refresh_lights():
             registry_id = getattr(vd, "light_registry_ids", {}).get(entity_id)
             if entry is None and registry_id is not None:
                 entry = registry_by_id.get(registry_id)
-            source = device_registry.devices.get(entry.device_id) if entry and entry.device_id else None
+            source = device_registry.async_get(entry.device_id) if entry and entry.device_id else None
             if entry:
                 eligible |= (entry.disabled_by is None and entry.platform not in SKIP_PLATFORMS
                              and (source is None or source.disabled_by is None))
@@ -1188,7 +1189,7 @@ def handle_device_registry_updated(event):
     # 跳过本集成自己创建的桥接设备条目
     if ghass is not None:
         dev_reg = dr.async_get(ghass)
-        dev_entry = dev_reg.devices.get(device_id)
+        dev_entry = dev_reg.async_get(device_id)
         if dev_entry is not None:
             entries = ghass.config_entries.async_entries(DOMAIN)
             entry_id = entries[0].entry_id if entries else None
@@ -1356,7 +1357,7 @@ def _create_bridge_device_entry_async(vd, name: str, model: str, manufacturer: s
                 device_entry.id, disabled_by=None
             )
             _LOGGER.info(f"Cleared residual disabled_by for sn={vd.sn}")
-            device_entry = dev_reg.devices.get(device_entry.id)
+            device_entry = dev_reg.async_get(device_entry.id)
         elif device_entry.disabled_by is not None:
             _disabled_device_sns.add(vd.sn)
             vd.online = False
@@ -1450,7 +1451,7 @@ def _on_device_registry_updated(event):
         return
 
     dev_reg = dr.async_get(ghass)
-    device_entry = dev_reg.devices.get(device_id)
+    device_entry = dev_reg.async_get(device_id)
     if device_entry is None:
         return
 
@@ -1521,7 +1522,9 @@ def _cleanup_all_device_entries_async():
     _cancel_device_registry_listeners.clear()
 
     # 移除所有属于此 config entry 的设备
-    for device in list(dev_reg.devices.values()):
+    for device in list(dev_reg.devices):
+        if isinstance(device, str):
+            device = dev_reg.async_get(device)
         if entry_id in device.config_entries:
             dev_reg.async_remove_device(device.id)
 

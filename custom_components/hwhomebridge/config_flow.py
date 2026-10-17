@@ -183,7 +183,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         
         for vd in all_vds:
             name = vd.product.name or vd.product.pid
-            orig_device = dev_reg.devices.get(vd.source_device_id)
+            orig_device = dev_reg.async_get(vd.source_device_id)
             if orig_device:
                 name = orig_device.name_by_user or orig_device.name or name
             
@@ -215,7 +215,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             )
 
             for vd in all_vds:
-                orig_device = dev_reg.devices.get(vd.source_device_id)
+                orig_device = dev_reg.async_get(vd.source_device_id)
                 name = vd.product.name or vd.product.pid
                 model = ""
                 manufacturer = ""

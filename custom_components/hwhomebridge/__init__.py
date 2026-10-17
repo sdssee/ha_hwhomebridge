@@ -42,7 +42,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # 为在 async_setup_entry 之前已注册的设备补建 HA 设备注册表条目
     if service_router is not None:
         for vd in service_router.sn_manager.get_all_devices():
-            device_entry = dev_reg.devices.get(vd.source_device_id)
+            device_entry = dev_reg.async_get(vd.source_device_id)
             name = ""
             model = ""
             manufacturer = ""
