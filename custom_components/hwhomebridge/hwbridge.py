@@ -21,6 +21,7 @@ import socket
 import json
 import threading
 import logging
+import hashlib
 from ctypes import *
 
 from homeassistant.core import HomeAssistant
@@ -153,6 +154,12 @@ async def start_hw_hilink_bridge(hass: HomeAssistant):
         _LOGGER.error(f"SO file not found: {so_path}, bridge will not start")
         return
 
+    # HACS overwrites integration files while HA is running. Loading the SDK
+    # directly from that directory lets an update truncate a mapped .so and
+    # terminate the process. Keep each SDK version in an immutable runtime file.
+    so_path = await hass.async_add_executor_job(
+        _prepare_native_library, so_path, hass.config.path('.storage', DOMAIN, 'lib')
+    )
     _LOGGER.info(f"Loading hilink bridge so: {so_path}")
     try:
         dll = cdll.LoadLibrary
@@ -245,6 +252,21 @@ async def handle_started_event(event):
     if service_router is not None and service_router.sn_manager.get_device_count() > 0:
         _LOGGER.info("Scheduling delayed state sync for newly registered devices")
         ghass.loop.call_later(30, _delayed_resync_all_devices)
+
+
+def _prepare_native_library(source, cache_dir):
+    """Copy a content-addressed SDK outside the directory managed by HACS."""
+    with open(source, "rb") as stream:
+        content = stream.read()
+    digest = hashlib.sha256(content).hexdigest()
+    os.makedirs(cache_dir, exist_ok=True)
+    target = os.path.join(cache_dir, f"libhilink_bridge-{digest}.so")
+    if not os.path.exists(target):
+        temporary = target + ".tmp"
+        with open(temporary, "wb") as stream:
+            stream.write(content)
+        os.replace(temporary, target)
+    return target
 
 
 

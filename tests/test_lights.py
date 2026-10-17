@@ -262,3 +262,16 @@ def test_ha_2026_device_collection_yields_entries(env, monkeypatch):
     monkeypatch.setattr(bridge.dr, "async_get", lambda hass: registry)
     bridge._discover_and_register_devices(env.hass)
     assert env.router.sn_manager.get_device_count() == 1
+
+
+def test_sdk_cache_is_immutable_across_updates(tmp_path):
+    source = tmp_path / "component.so"
+    cache = tmp_path / "runtime"
+    source.write_bytes(b"SDK version one")
+    first = Path(bridge._prepare_native_library(str(source), str(cache)))
+    assert Path(bridge._prepare_native_library(str(source), str(cache))) == first
+    source.write_bytes(b"SDK version two")
+    second = Path(bridge._prepare_native_library(str(source), str(cache)))
+    assert second != first
+    assert first.read_bytes() == b"SDK version one"
+    assert second.read_bytes() == b"SDK version two"
