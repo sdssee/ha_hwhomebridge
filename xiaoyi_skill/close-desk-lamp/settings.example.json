@@ -1,4 +1,0 @@
-{
-  "endpoint": "https://YOUR_HOST/YOUR_PRIVATE_HOME_GATEWAY_PATH",
-  "tls12_compat": true
-}

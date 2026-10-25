@@ -53,8 +53,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             _create_bridge_device_entry_async(vd, vd.display_name or name, model, manufacturer)
 
     _LOGGER.info("hwhomebridge config entry setup complete")
-    from .xiaoyi_api import async_setup_xiaoyi
-    await async_setup_xiaoyi(hass, entry)
     return True
 
 
